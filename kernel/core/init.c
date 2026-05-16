@@ -6,6 +6,8 @@
 #include <linux/sched.h>
 #include <linux/workqueue.h>
 #include <linux/moduleparam.h>
+#include <linux/bootconfig.h>
+#include <linux/namei.h>
 
 #include "policy/allowlist.h"
 #include "policy/app_profile.h"
@@ -79,6 +81,38 @@ bool allow_shell = false;
 #endif
 module_param(allow_shell, bool, 0);
 
+extern char *saved_command_line;
+static bool inRecovery = false;
+
+// https://cs.android.com/android/platform/superproject/+/android-latest-release:system/core/init/first_stage_init.cpp;l=301
+// https://cs.android.com/android/platform/superproject/+/android-latest-release:system/core/init/first_stage_init.cpp;l=117-120
+// https://cs.android.com/android/platform/superproject/+/android-latest-release:system/core/init/util.cpp;l=672-674
+static bool __init isInRecovery()
+{
+    struct path path;
+
+    if (strstr(saved_command_line, "androidboot.force_normal_boot=1")) {
+        pr_info("androidboot.force_normal_boot=1 found by cmdline check");
+        return false;
+    }
+
+    struct xbc_node *root = xbc_find_node("androidboot");
+    const char *val = xbc_node_find_value(root, "force_normal_boot", NULL);
+
+    if (val && strcmp(val, "1") == 0) {
+        pr_info("androidboot.force_normal_boot=1 found by bootconfig check.\n");
+        return false;
+    }
+
+    if (kern_path("/system/bin/recovery", 0, &path) == 0) {
+        pr_info("/system/bin/recovery found. we are in recovery.");
+        path_put(&path);
+        return true;
+    }
+
+    return false;
+}
+
 int __init kernelsu_init(void)
 {
 #if defined(__x86_64__)
@@ -112,6 +146,14 @@ int __init kernelsu_init(void)
     pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
     pr_alert("*************************************************************");
 #endif
+
+    inRecovery = isInRecovery();
+
+    if (inRecovery) {
+        pr_info("We are in recovery! Self exit to avoid Kernel Panic...");
+        return -EAGAIN;
+    }
+
     if (allow_shell) {
         pr_alert("shell is allowed at init!");
     }
@@ -182,6 +224,12 @@ int __init kernelsu_init(void)
 
 void __exit kernelsu_exit(void)
 {
+    // When we are in recovery, we even doesn't load ourselves
+    // So we can safe do nothing here
+   if (inRecovery) {
+       return;
+   }
+
     // Phase 1: Stop all hooks first to prevent new callbacks
     ksu_syscall_hook_manager_exit();
 
